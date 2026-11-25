@@ -45,11 +45,14 @@ const NOT_REPOS = new Set([
 ]);
 
 /**
- * A URL with any scheme, kept as written. The parser already makes links of
- * `http`, `https` and `www.` literals; this covers `ftp://`, `ssh://` and the
- * rest. The scheme's length is bounded so a long word scans in linear time.
+ * A URL kept as written: any scheme followed by `//`, a scheme that takes
+ * none (`mailto:`, `data:`, ...), or a `www.` literal. Matched on the whole
+ * source, since a URL can span several nodes (`file:///a/~b~` holds a
+ * strikethrough). It ends at whitespace, `<`, `>` or a table's `|`, and the
+ * scheme's length is bounded so a long word scans in linear time.
  */
-const SCHEME_URL = /[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/\S*/u.source;
+const URL =
+  /(?<![A-Za-z0-9+.-])(?:[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/|(?:mailto|data|tel|urn|sms|magnet|news|xmpp):|www\.)[^\s<>|]*/giu;
 
 /**
  * A GitHub reference: `repo#N` or `owner/repo#N`.
@@ -58,15 +61,13 @@ const SCHEME_URL = /[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/\S*/u.source;
  *   before it, so `café#1`, `a/b/c#1`, `me@host#1` and `C:\src\api#1` stay
  *   text.
  * - The owner follows GitHub's rule: letters, digits and hyphens.
+ * - A repo may start with `-`, which `linkFor` allows only after an owner.
  * - Lookahead: the number ends the token, so `repo#12abc`, `api#1@host`
  *   and `api#1.5` stay text.
  * - Every quantifier is bounded, so the scan stays linear.
  */
 const REFERENCE =
-  /(?<![\p{L}\p{N}_./#@\\-])(?:(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})\/)?(?<repo>[A-Za-z0-9._][A-Za-z0-9._-]{0,99})#(?<number>\d{1,9})(?![\p{L}\p{N}_@-]|\.\d)/u
-    .source;
-
-const SCAN = new RegExp(`(?<kept>${SCHEME_URL})|${REFERENCE}`, "gu");
+  /(?<![\p{L}\p{N}_./#@\\-])(?:(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})\/)?(?<repo>[A-Za-z0-9._-]{1,100})#(?<number>\d{1,9})(?![\p{L}\p{N}_@-]|\.\d)/gu;
 
 /**
  * Nodes whose text stays as written: code, HTML, existing links and images,
@@ -99,8 +100,11 @@ const PHRASING_PARENTS = new Set<Nodes["type"]>([
   "tableCell",
 ]);
 
-const HTML_TAG =
-  /^<(?<closing>\/)?(?<name>[A-Za-z][A-Za-z0-9-]*)\b[^>]*?(?<selfClosing>\/)?>$/u;
+/**
+ * The name of an HTML tag, read from its start: the parser already found
+ * where the tag ends, a quoted `>` in an attribute included.
+ */
+const HTML_TAG = /^<(?<closing>\/)?(?<name>[A-Za-z][A-Za-z0-9-]*)/u;
 
 /**
  * Reads the two options: a default owner, and `repo=owner` pairs separated
@@ -136,19 +140,43 @@ function urlFor(owner: string, repo: string, number: string): string {
  * byte outside the references.
  */
 export function linkify(markdown: string, owners: Owners): string {
-  if (!markdown.includes("#")) return markdown;
+  // No reference without a `#` before a digit: skip the parse, which costs
+  // milliseconds on a long reply.
+  if (!/#\d/.test(markdown)) return markdown;
+  // The parser drops a leading byte-order mark before it counts offsets.
+  if (markdown.startsWith("\uFEFF")) {
+    return `\uFEFF${linkify(markdown.slice(1), owners)}`;
+  }
 
   const edits: Edit[] = [];
   collect(parseMarkdown(markdown), markdown, owners, edits);
 
   let linked = "";
   let from = 0;
-  for (const { start, end, text } of edits) {
+  for (const { start, end, text } of outsideUrls(edits, markdown)) {
     linked += markdown.slice(from, start) + text;
     from = end;
   }
 
   return linked + markdown.slice(from);
+}
+
+/**
+ * The edits that overlap no URL. Both lists run in source order, so one
+ * pass over each keeps it linear.
+ */
+function outsideUrls(edits: readonly Edit[], markdown: string): Edit[] {
+  const urls = [...markdown.matchAll(URL)].map((match) => ({
+    start: match.index,
+    end: match.index + match[0].length,
+  }));
+  let next = 0;
+
+  return edits.filter((edit) => {
+    while (next < urls.length && (urls[next]?.end ?? 0) <= edit.start) next++;
+    const url = urls[next];
+    return url === undefined || url.start >= edit.end;
+  });
 }
 
 /** Walks the tree in source order, adding an edit for each reference. */
@@ -181,12 +209,13 @@ function collect(
 
 /** Counts an inline HTML tag in or out of the open kept elements. */
 function track(open: Map<string, number>, tag: string): void {
-  const groups = HTML_TAG.exec(tag.trim())?.groups;
+  const trimmed = tag.trim();
+  const groups = HTML_TAG.exec(trimmed)?.groups;
   const name = groups?.["name"]?.toLowerCase();
   if (
     name === undefined ||
     !KEPT_ELEMENTS.has(name) ||
-    groups?.["selfClosing"]
+    trimmed.endsWith("/>")
   ) {
     return;
   }
@@ -203,13 +232,17 @@ function editsIn(node: Text, markdown: string, owners: Owners): Edit[] {
   if (start === undefined || end === undefined) return [];
 
   const edits: Edit[] = [];
-  for (const match of markdown.slice(start, end).matchAll(SCAN)) {
+  for (const match of markdown.slice(start, end).matchAll(REFERENCE)) {
     const link = linkFor(match[0], match.groups ?? {}, owners);
     if (link === null) continue;
 
     const at = start + match.index;
-    // `!` before `[` would make the link an image, so it is escaped.
-    const isBang = at > start && markdown[at - 1] === "!";
+    // `!` before `[` would make the link an image, so it is escaped,
+    // unless an odd run of backslashes already escapes it.
+    const isBang =
+      at > start &&
+      markdown[at - 1] === "!" &&
+      (/\\*$/u.exec(markdown.slice(start, at - 1))?.[0].length ?? 0) % 2 === 0;
     edits.push({
       start: isBang ? at - 1 : at,
       end: at + match[0].length,
@@ -223,12 +256,12 @@ function editsIn(node: Text, markdown: string, owners: Owners): Edit[] {
 /** The markdown link for one match, or null to leave it as written. */
 function linkFor(
   match: string,
-  { kept, owner, repo, number }: Record<string, string | undefined>,
+  { owner, repo, number }: Record<string, string | undefined>,
   { defaultOwner, owners }: Owners,
 ): string | null {
-  if (kept !== undefined || repo === undefined || number === undefined) {
-    return null;
-  }
+  if (repo === undefined || number === undefined) return null;
+  // GitHub allows a leading `-`, but in prose `-api#1` is a dash and a word.
+  if (owner === undefined && repo.startsWith("-")) return null;
 
   const resolved =
     owner ?? owners.get(repo.toLowerCase()) ?? guess(repo, defaultOwner);

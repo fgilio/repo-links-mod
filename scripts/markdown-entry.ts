@@ -6,9 +6,17 @@ import { fromMarkdown } from "mdast-util-from-markdown";
 import { gfmFromMarkdown } from "mdast-util-gfm";
 import { gfm } from "micromark-extension-gfm";
 
+/**
+ * GFM without its tree transforms. The autolink literal transform splits
+ * text nodes after parsing and leaves the new nodes without source
+ * positions, so the mod could not edit them. The tokenizer still finds
+ * every literal it can, with positions; linkify keeps the rest of the URLs
+ * it scans as written.
+ */
+const mdastExtensions = gfmFromMarkdown().map(
+  ({ transforms: _transforms, ...extension }) => extension,
+);
+
 export function parseMarkdown(markdown: string) {
-  return fromMarkdown(markdown, {
-    extensions: [gfm()],
-    mdastExtensions: [gfmFromMarkdown()],
-  });
+  return fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions });
 }

@@ -249,6 +249,53 @@ test("time grows linearly with unmatched brackets", () => {
   expect(timeFor(64_000) / Math.max(timeFor(8000), 1) < 24).toBe(true);
 });
 
+test("a URL keeps its text across nodes, with or without //", () => {
+  for (const text of [
+    "file:///tmp/~acme/api#12~",
+    "data:text/plain,api#1",
+    "mailto:api#1",
+    "[www.example.com/api#1]",
+  ]) {
+    expect(linkify(text, ACME)).toBe(text);
+  }
+  expect(linkify("See [www.example.com] for acme/api#1", ACME)).toBe(
+    "See [www.example.com] for [acme/api#1](https://github.com/acme/api/pull/1)",
+  );
+});
+
+test("a leading byte-order mark keeps the offsets right", () => {
+  expect(linkify("\uFEFFacme/api#12", ACME)).toBe(
+    "\uFEFF[acme/api#12](https://github.com/acme/api/pull/12)",
+  );
+});
+
+test("a repo may start with - after an owner only", () => {
+  expect(linkify("acme/-docs#12 and -docs#3", ACME)).toBe(
+    "[acme/-docs#12](https://github.com/acme/-docs/pull/12) and -docs#3",
+  );
+});
+
+test("an escaped ! is not escaped again", () => {
+  expect(linkify("\\!api#1", ACME)).toBe(
+    "\\![api#1](https://github.com/acme/api/pull/1)",
+  );
+  expect(linkify("\\\\!api#1", ACME)).toBe(
+    "\\\\\\![api#1](https://github.com/acme/api/pull/1)",
+  );
+});
+
+test("an inline element's content stays as written, a quoted > in a tag included", () => {
+  const text = 'See <a title="1 > 0" href="/guide">acme/api#1</a>';
+
+  expect(linkify(text, ACME)).toBe(text);
+});
+
+test("text with no # before a digit is returned without a parse", () => {
+  const text = "# Heading\n\n| a | b |\n|---|---|\n| c | d |";
+
+  expect(linkify(text, ACME)).toBe(text);
+});
+
 test("an owner pair needs exactly one =", () => {
   expect([...parseOwners("", "api=one=two").owners]).toEqual([]);
 });
