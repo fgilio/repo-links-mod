@@ -3,7 +3,12 @@
 import { describe, expect, test } from "bun:test";
 import { win32 } from "node:path";
 
-import { binaryPath, versionMismatch, versionOf } from "./claude-code-types";
+import {
+  binaryPath,
+  generate,
+  versionMismatch,
+  versionOf,
+} from "./claude-code-types";
 
 const HEADER = "// Written by Claude Code 2.1.302.\n// Claude Code ...\n";
 
@@ -63,5 +68,17 @@ describe("binaryPath", () => {
 
   test("leaves a bare command name to PATH", () => {
     expect(binaryPath("claude", "/work")).toBe("claude");
+  });
+});
+
+describe("generate", () => {
+  test("reports how Claude Code exited when it wrote nothing", async () => {
+    // `false` exits 1 at once, before any temporary folder exists.
+    const failure = await generate(
+      Bun.which("false") ?? "/usr/bin/false",
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toContain("exited with code 1");
   });
 });
