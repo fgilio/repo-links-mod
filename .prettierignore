@@ -1,0 +1,3 @@
+# Generated: scripts/build-markdown.ts writes it, and the freshness test in
+# scripts/build-markdown.spec.ts holds it to a fresh build byte for byte.
+hooks/vendor/
