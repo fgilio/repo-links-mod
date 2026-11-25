@@ -1,0 +1,22 @@
+{
+  "name": "repo-links",
+  "version": "0.1.0",
+  "description": "Turns repo#123 and owner/repo#123 in Claude's replies into links to the GitHub pull request or issue",
+  "author": { "name": "Franco Gilio" },
+  "repository": "https://github.com/fgilio/repo-links-mod",
+  "license": "MIT",
+  "userConfig": {
+    "defaultOwner": {
+      "type": "string",
+      "title": "Default owner",
+      "description": "The GitHub user or organization for a bare repo#123. Empty links owner/repo#123 only",
+      "default": ""
+    },
+    "owners": {
+      "type": "string",
+      "title": "Owner per repo",
+      "description": "Repos outside the default owner, as repo=owner pairs separated by commas, e.g. tool-lines-mod=fgilio, rails=rails",
+      "default": ""
+    }
+  }
+}
