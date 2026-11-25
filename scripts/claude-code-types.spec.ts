@@ -42,6 +42,12 @@ describe("versionMismatch", () => {
 });
 
 describe("binaryPath", () => {
+  test("resolves a relative Windows path against the working directory", () => {
+    expect(binaryPath(".\\bin\\claude.exe", "/work")).not.toBe(
+      ".\\bin\\claude.exe",
+    );
+  });
+
   test("resolves a relative path against the working directory", () => {
     expect(binaryPath("./bin/claude", "/work")).toBe("/work/bin/claude");
   });

@@ -57,7 +57,8 @@ export function versionMismatch(
  * the working directory, or a bare command name left for PATH to find.
  */
 export function binaryPath(claude: string, cwd: string): string {
-  return claude.includes("/") ? resolve(cwd, claude) : claude;
+  // A Windows path such as `.\bin\claude.exe` separates with `\`.
+  return /[\\/]/.test(claude) ? resolve(cwd, claude) : claude;
 }
 
 /**
