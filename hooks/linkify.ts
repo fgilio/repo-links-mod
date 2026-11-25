@@ -31,6 +31,23 @@ export type GitHubRepo = { owner: string; repo: string };
  */
 type Context = Owners & { here: GitHubRepo | null };
 
+/**
+ * The visible text before the current node in its paragraph, heading or
+ * cell, kept to its last `LEAD_SIZE` characters: what a bare `#N` reads
+ * after, across emphasis (`**Option** #1`).
+ */
+type Lead = { text: string };
+
+/** Long enough for the longest prose word, a `.` and some whitespace. */
+const LEAD_SIZE = 32;
+
+/** Nodes that start a new run of visible text. */
+const LEAD_ROOTS = new Set<Nodes["type"]>([
+  "heading",
+  "paragraph",
+  "tableCell",
+]);
+
 /** One replacement in the source: `[start, end)` becomes `text`. */
 type Edit = { start: number; end: number; text: string };
 
@@ -70,7 +87,7 @@ const NOT_REPOS = new Set([
  * strikethrough). It ends at whitespace, `<`, `>` or a table's `|`, and the
  * scheme's length is bounded so a long word scans in linear time.
  */
-const URL =
+const URL_SPAN =
   /(?<![A-Za-z0-9+.-])(?:[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/|(?:mailto|data|tel|urn|sms|magnet|news|xmpp):|www\.)[^\s<>|]*/giu;
 
 /**
@@ -88,6 +105,9 @@ const URL =
 const REFERENCE =
   /(?<![\p{L}\p{N}_./#@\\-])(?:(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})\/)?(?<repo>[A-Za-z0-9._-]{1,100})#(?<number>\d{1,9})(?![\p{L}\p{N}_@-]|\.\d)|(?<![\p{L}\p{N}_./#@\\&-])#(?<bare>\d{1,9})(?![\p{L}\p{N}_@-]|\.\d)/gu;
 
+/** A `#N` that could be bare, by the same lookbehind as REFERENCE's. */
+const BARE_HINT = /(?<![\p{L}\p{N}_./#@\\&-])#\d/u;
+
 /**
  * Words after which a bare `#N` is a count or a rank, not a pull request:
  * "Option #1", "step #2", "color #333". Compared in any case, with an
@@ -97,11 +117,14 @@ const PROSE_BEFORE_BARE =
   /(?:^|[^\p{L}\p{N}])(?:chapter|color|colour|day|item|items|level|no|nr|num|number|option|options|page|part|phase|priority|rank|ranked|round|section|step|steps|task|tier|top|version|week)\.?\s*$/iu;
 
 /**
- * A GitHub remote as git writes it: `git@github.com:owner/repo.git`,
- * `ssh://git@github.com/owner/repo` or `https://github.com/owner/repo.git`.
+ * The scp-like remote git writes for SSH: `git@github.com:owner/repo.git`.
+ * A remote with a scheme (`ssh://`, `https://`) is read as a URL instead.
  */
-const GITHUB_REMOTE =
-  /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|(?:ssh:\/\/)?git@github\.com[:/])(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})\/(?<repo>[A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/u;
+const SCP_REMOTE = /^[^@\s/]+@(?<host>[^:\s/]+):(?<path>[^\s]+)$/u;
+
+/** A repo path on GitHub: `owner/repo`, with an optional `.git` or `/`. */
+const REPO_PATH =
+  /^\/?(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})\/(?<repo>[A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/u;
 
 /**
  * Nodes whose text stays as written: code, HTML, existing links and images,
@@ -163,13 +186,41 @@ export function parseOwners(defaultOwner: string, pairs: string): Owners {
   return { defaultOwner: defaultOwner.trim() || null, owners };
 }
 
-/** The GitHub repository a git remote URL names, or null for any other. */
+/**
+ * The GitHub repository a git remote names, or null for any other host:
+ * `git@github.com:owner/repo.git`, `ssh://git@github.com:22/owner/repo`,
+ * `https://token@GitHub.com/owner/repo.git`.
+ */
 export function githubRepoOf(remote: string | null): GitHubRepo | null {
-  const groups = GITHUB_REMOTE.exec(remote?.trim() ?? "")?.groups;
+  const trimmed = remote?.trim() ?? "";
+  const scp = SCP_REMOTE.exec(trimmed)?.groups;
+  const [host, path] =
+    scp !== undefined && !trimmed.includes("://")
+      ? [scp["host"], scp["path"]]
+      : urlParts(trimmed);
+  if (host?.toLowerCase() !== "github.com" || path === undefined) return null;
+
+  const groups = REPO_PATH.exec(path)?.groups;
   const owner = groups?.["owner"];
   const repo = groups?.["repo"];
 
   return owner !== undefined && repo !== undefined ? { owner, repo } : null;
+}
+
+/** A URL remote's host and path, or nothing when it is not a URL. */
+function urlParts(remote: string): [string | undefined, string | undefined] {
+  if (!URL.canParse(remote)) return [undefined, undefined];
+  const { hostname, pathname } = new URL(remote);
+
+  return [hostname, pathname];
+}
+
+/**
+ * Whether the text holds a `#N` with nothing that makes it `repo#N` before
+ * it: the cheap check before the session's repo is looked up.
+ */
+export function hasBareReference(text: string): boolean {
+  return BARE_HINT.test(text);
 }
 
 /**
@@ -217,7 +268,7 @@ export function linkify(
  * pass over each keeps it linear.
  */
 function outsideUrls(edits: readonly Edit[], markdown: string): Edit[] {
-  const urls = [...markdown.matchAll(URL)].map((match) => ({
+  const urls = [...markdown.matchAll(URL_SPAN)].map((match) => ({
     start: match.index,
     end: match.index + match[0].length,
   }));
@@ -236,10 +287,15 @@ function collect(
   markdown: string,
   context: Context,
   edits: Edit[],
+  lead: Lead = { text: "" },
 ): void {
-  if (KEPT_NODES.has(node.type)) return;
+  if (KEPT_NODES.has(node.type)) {
+    lead.text = (lead.text + visibleText(node)).slice(-LEAD_SIZE);
+    return;
+  }
   if (node.type === "text") {
-    edits.push(...editsIn(node, markdown, context));
+    edits.push(...editsIn(node, markdown, context, lead));
+    lead.text = (lead.text + node.value).slice(-LEAD_SIZE);
     return;
   }
   if (!("children" in node)) return;
@@ -248,14 +304,31 @@ function collect(
   // phrasing holds inline HTML: a block of HTML is one node of its own.
   const open = new Map<string, number>();
   const isPhrasing = PHRASING_PARENTS.has(node.type);
+  const childLead = LEAD_ROOTS.has(node.type) ? { text: "" } : lead;
   for (const child of node.children) {
     if (child.type === "html" && isPhrasing) {
       track(open, child.value);
       continue;
     }
     if (open.size > 0) continue;
-    collect(child, markdown, context, edits);
+    collect(
+      child,
+      markdown,
+      context,
+      edits,
+      isPhrasing ? childLead : { text: "" },
+    );
   }
+}
+
+/** The text a kept node shows: a code span's code, a link's label. */
+function visibleText(node: Nodes): string {
+  if (node.type === "inlineCode") return node.value;
+  if (!("children" in node)) return "";
+
+  return node.children
+    .map((child) => ("value" in child ? child.value : visibleText(child)))
+    .join("");
 }
 
 /** Counts an inline HTML tag in or out of the open kept elements. */
@@ -277,18 +350,28 @@ function track(open: Map<string, number>, tag: string): void {
 }
 
 /** The edits for the references in one text node, read from its source. */
-function editsIn(node: Text, markdown: string, context: Context): Edit[] {
+function editsIn(
+  node: Text,
+  markdown: string,
+  context: Context,
+  lead: Lead,
+): Edit[] {
   const start = node.position?.start.offset;
   const end = node.position?.end.offset;
   if (start === undefined || end === undefined) return [];
 
   const edits: Edit[] = [];
   for (const match of markdown.slice(start, end).matchAll(REFERENCE)) {
-    const before = markdown.slice(start, start + match.index);
+    // Only the end of the text before the match: a prose word is short, and
+    // reading it all again for each match would grow with the square.
+    const at = start + match.index;
+    const before = (
+      (match.index < LEAD_SIZE ? lead.text : "") +
+      markdown.slice(Math.max(start, at - LEAD_SIZE), at)
+    ).slice(-LEAD_SIZE);
     const link = linkFor(match[0], match.groups ?? {}, before, context);
     if (link === null) continue;
 
-    const at = start + match.index;
     // `!` before `[` would make the link an image, so it is escaped,
     // unless an odd run of backslashes already escapes it.
     const isBang =

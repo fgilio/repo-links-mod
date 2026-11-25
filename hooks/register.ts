@@ -1,6 +1,12 @@
 import type { EngineInterface, Register } from "claude-code";
 
-import { type GitHubRepo, githubRepoOf, linkify, parseOwners } from "./linkify";
+import {
+  type GitHubRepo,
+  githubRepoOf,
+  hasBareReference,
+  linkify,
+  parseOwners,
+} from "./linkify";
 
 /**
  * How many reply blocks keep their linked text. The hook runs again for a
@@ -44,7 +50,12 @@ export const register: Register = (on, options) => {
   };
 
   on("ui.render", { component: "AssistantMessage" }, async ($, e, next) => {
-    const here = linksSessionRepo ? await sessionRepo($) : null;
+    // Only a bare #N needs the session's repo, and the lookup reads the
+    // working copy, so a reply without one skips it.
+    const here =
+      linksSessionRepo && hasBareReference(e.props.text)
+        ? await sessionRepo($)
+        : null;
     const text = linked(e.props.text, here);
     if (text === e.props.text) return next(e);
 

@@ -1,7 +1,12 @@
 import type { On } from "claude-code";
 import { expect, test } from "claude-code/testing";
 
-import { githubRepoOf, linkify, parseOwners } from "../hooks/linkify";
+import {
+  githubRepoOf,
+  hasBareReference,
+  linkify,
+  parseOwners,
+} from "../hooks/linkify";
 
 const SURFACES = ["terminal", "desktop", "vscode", "mobile"] as const;
 const ACME = parseOwners("acme", "");
@@ -219,6 +224,35 @@ test("a bare #N skips counts, ranks, colors, entities and other tokens", () => {
   );
 });
 
+test("a prose word before a bare #N counts across emphasis", () => {
+  const here = { owner: "acme", repo: "app" };
+  for (const text of ["**Option** #1", "Option **#1**", "_Step_ *#2*"]) {
+    expect(linkify(text, ACME, here)).toBe(text);
+  }
+  expect(linkify("**Fixed** #3", ACME, here)).toBe(
+    "**Fixed** [#3](https://github.com/acme/app/pull/3)",
+  );
+});
+
+test("time grows linearly with bare references", () => {
+  const here = { owner: "acme", repo: "app" };
+  const timeOf = (count: number): number => {
+    const text = "see #1, ".repeat(count);
+    const start = performance.now();
+    linkify(text, ACME, here);
+    return performance.now() - start;
+  };
+  timeOf(500);
+
+  // Quadratic growth makes 8x the input take 64x the time.
+  expect(timeOf(16_000) / Math.max(timeOf(2000), 1) < 24).toBe(true);
+});
+
+test("hasBareReference finds a #N that no repo name precedes", () => {
+  expect(hasBareReference("see #573")).toBe(true);
+  expect(hasBareReference("see api#573, a/#1 and &#123;")).toBe(false);
+});
+
 test("a bare #N without a session repository stays text", () => {
   expect(linkify("#573 and api#2", ACME)).toBe(
     "#573 and [api#2](https://github.com/acme/api/pull/2)",
@@ -231,6 +265,10 @@ test("githubRepoOf reads the remotes git writes", () => {
     "ssh://git@github.com/acme/app",
     "https://github.com/acme/app.git",
     "https://token@github.com/acme/app/",
+    "ssh://git@github.com:22/acme/app.git",
+    "https://github.com:443/acme/app.git",
+    "https://GitHub.com/acme/app.git",
+    "GIT@GITHUB.COM:acme/app.git",
   ]) {
     expect(githubRepoOf(remote)).toEqual({ owner: "acme", repo: "app" });
   }
