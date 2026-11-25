@@ -255,6 +255,7 @@ test("a URL keeps its text across nodes, with or without //", () => {
     "data:text/plain,api#1",
     "mailto:api#1",
     "[www.example.com/api#1]",
+    "ftp://host/_api#1_",
   ]) {
     expect(linkify(text, ACME)).toBe(text);
   }
@@ -285,9 +286,12 @@ test("an escaped ! is not escaped again", () => {
 });
 
 test("an inline element's content stays as written, a quoted > in a tag included", () => {
-  const text = 'See <a title="1 > 0" href="/guide">acme/api#1</a>';
-
-  expect(linkify(text, ACME)).toBe(text);
+  for (const text of [
+    'See <a title="1 > 0" href="/guide">acme/api#1</a>',
+    'x <code title=">">api#1</code>',
+  ]) {
+    expect(linkify(text, ACME)).toBe(text);
+  }
 });
 
 test("text with no # before a digit is returned without a parse", () => {
