@@ -18,6 +18,12 @@
       "title": "Owner per repo",
       "description": "Repos outside the default owner, as name=owner or name=owner/repo pairs separated by commas, e.g. tool-lines-mod=fgilio, tool-lines=fgilio/tool-lines-mod",
       "default": ""
+    },
+    "sessionRepo": {
+      "type": "boolean",
+      "title": "Link a bare #N",
+      "description": "Link a bare #123 to the pull request or issue in the GitHub repository of the session's folder",
+      "default": true
     }
   }
 }

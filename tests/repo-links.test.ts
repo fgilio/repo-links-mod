@@ -1,7 +1,7 @@
 import type { On } from "claude-code";
 import { expect, test } from "claude-code/testing";
 
-import { linkify, parseOwners } from "../hooks/linkify";
+import { githubRepoOf, linkify, parseOwners } from "../hooks/linkify";
 
 const SURFACES = ["terminal", "desktop", "vscode", "mobile"] as const;
 const ACME = parseOwners("acme", "");
@@ -140,6 +140,113 @@ test(
     ]);
   },
 );
+
+/** Stands for git: the session's folder is a clone with this origin. */
+function cloneOf(on: On, remote: string | null): void {
+  on("session.repo", () => ({
+    value: { root: "/work/app", remote, internal: false, name: "app" },
+  }));
+}
+
+test("a bare #N links to the session's repository", async ($, on) => {
+  cloneOf(on, "git@github.com:acme/app.git");
+  const drawn = recordDrawn(on);
+
+  const ui = await $.ui.mount({
+    plugin: "repo-links",
+    surface: "terminal",
+    component: "AssistantMessage",
+    props: {
+      text: "#573 replaces #555. Option #1 stays.",
+      isFirstOfReply: true,
+    },
+  });
+  await ui.unmount();
+
+  expect(drawn).toEqual([
+    "[#573](https://github.com/acme/app/pull/573) replaces [#555](https://github.com/acme/app/pull/555). Option #1 stays.",
+  ]);
+});
+
+test(
+  "the sessionRepo option off leaves a bare #N as text",
+  { options: { sessionRepo: false } },
+  async ($, on) => {
+    cloneOf(on, "git@github.com:acme/app.git");
+    const drawn = recordDrawn(on);
+
+    const ui = await $.ui.mount({
+      plugin: "repo-links",
+      surface: "terminal",
+      component: "AssistantMessage",
+      props: { text: "#573", isFirstOfReply: true },
+    });
+    await ui.unmount();
+
+    expect(drawn).toEqual(["#573"]);
+  },
+);
+
+test("a session outside GitHub leaves a bare #N as text", async ($, on) => {
+  cloneOf(on, "git@gitlab.com:acme/app.git");
+  const drawn = recordDrawn(on);
+
+  const ui = await $.ui.mount({
+    plugin: "repo-links",
+    surface: "terminal",
+    component: "AssistantMessage",
+    props: { text: "#573", isFirstOfReply: true },
+  });
+  await ui.unmount();
+
+  expect(drawn).toEqual(["#573"]);
+});
+
+test("a bare #N skips counts, ranks, colors, entities and other tokens", () => {
+  const here = { owner: "acme", repo: "app" };
+  for (const text of [
+    "Option #1, step #2, Item #3, top #10, priority #1, No. #4",
+    "color #333, phase  #2",
+    "&#123; a#1 x/#2 ##3 #4a #5.5 #6@x",
+    "`#7` and [#8](https://x)",
+  ]) {
+    expect(linkify(text, ACME, here)).toBe(text);
+  }
+  expect(
+    linkify("PR #573, issue #9 and (#10)", parseOwners("", ""), here),
+  ).toBe(
+    "PR [#573](https://github.com/acme/app/pull/573), issue [#9](https://github.com/acme/app/pull/9) and ([#10](https://github.com/acme/app/pull/10))",
+  );
+});
+
+test("a bare #N without a session repository stays text", () => {
+  expect(linkify("#573 and api#2", ACME)).toBe(
+    "#573 and [api#2](https://github.com/acme/api/pull/2)",
+  );
+});
+
+test("githubRepoOf reads the remotes git writes", () => {
+  for (const remote of [
+    "git@github.com:acme/app.git",
+    "ssh://git@github.com/acme/app",
+    "https://github.com/acme/app.git",
+    "https://token@github.com/acme/app/",
+  ]) {
+    expect(githubRepoOf(remote)).toEqual({ owner: "acme", repo: "app" });
+  }
+  expect(githubRepoOf("https://github.com/acme/my.repo.git")).toEqual({
+    owner: "acme",
+    repo: "my.repo",
+  });
+  for (const remote of [
+    null,
+    "git@gitlab.com:acme/app.git",
+    "https://github.com/acme",
+    "/srv/git/app.git",
+  ]) {
+    expect(githubRepoOf(remote)).toBe(null);
+  }
+});
 
 test("repo#N and owner/repo#N become links", () => {
   expect(linkify("in api#103, (web-app#663) and widgets/tools#10.", ACME)).toBe(
