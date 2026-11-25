@@ -1,6 +1,5 @@
 {
   "name": "repo-links",
-  "version": "0.1.0",
   "description": "Turns repo#123 and owner/repo#123 in Claude's replies into links to the GitHub pull request or issue",
   "author": {
     "name": "Franco Gilio"
