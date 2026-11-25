@@ -19,13 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Scope of this license: this mod is a fork of the tool-lines mod in
-Tickloop/claude-mods (https://github.com/Tickloop/claude-mods), forked at
-commit 1042852. The MIT grant above covers only the changes made in this
-fork. The code inherited from tool-lines carries no license grant from its
-author, so anyone who redistributes it needs that author's permission. If you
-are that author and want the terms of your part changed or the fork taken
-down, open an issue.

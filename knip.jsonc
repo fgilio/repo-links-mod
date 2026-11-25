@@ -1,0 +1,9 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+  // Claude Code loads the hooks module and the mod tests itself, and gives
+  // them the `claude-code` modules, so nothing imports either and no package
+  // provides those modules.
+  "entry": ["hooks/register.ts", "tests/*.test.ts", "scripts/*.ts"],
+  "project": ["hooks/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"],
+  "ignoreDependencies": ["claude-code"],
+}

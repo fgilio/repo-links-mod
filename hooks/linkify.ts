@@ -1,16 +1,34 @@
+import type { Nodes, Text } from "mdast";
+
+import { parseMarkdown } from "./vendor/markdown.js";
+
 /**
- * Who owns a repo: the `owners` entry for it, else `defaultOwner`. Without
- * either, a bare `repo#N` stays text. Keys are lower case, as GitHub
- * compares repo names.
+ * Where a bare `repo#N` points: the `owners` entry for the name, else
+ * `defaultOwner`. Without either, it stays text. Keys are lower case, as
+ * GitHub compares repo names.
  */
 export type Owners = {
   defaultOwner: string | null;
-  owners: ReadonlyMap<string, string>;
+  owners: ReadonlyMap<string, Target>;
 };
 
 /**
+ * An `owners` entry: the owner, and the repo when the name written in
+ * prose differs from it (`tool-lines=fgilio/tool-lines-mod`).
+ */
+type Target = { owner: string; repo: string | null };
+
+/** An `owners` value: `owner`, or `owner/repo`. */
+const TARGET =
+  /^(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})(?:\/(?<repo>[A-Za-z0-9._-]{1,100}))?$/u;
+
+/** One replacement in the source: `[start, end)` becomes `text`. */
+type Edit = { start: number; end: number; text: string };
+
+/**
  * Words that read as `word#N` in prose and are never a repo, so `PR#5` or
- * `step#2` stays text. Compared in lower case.
+ * `step#2` stays text. Compared in lower case. Only a bare `repo#N` that
+ * falls back to the default owner is held to them.
  */
 const NOT_REPOS = new Set([
   "bug",
@@ -37,47 +55,85 @@ const NOT_REPOS = new Set([
 ]);
 
 /**
+ * A URL kept as written: any scheme followed by `//`, a scheme that takes
+ * none (`mailto:`, `data:`, ...), or a `www.` literal. Matched on the whole
+ * source, since a URL can span several nodes (`file:///a/~b~` holds a
+ * strikethrough). It ends at whitespace, `<`, `>` or a table's `|`, and the
+ * scheme's length is bounded so a long word scans in linear time.
+ */
+const URL =
+  /(?<![A-Za-z0-9+.-])(?:[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/|(?:mailto|data|tel|urn|sms|magnet|news|xmpp):|www\.)[^\s<>|]*/giu;
+
+/**
  * A GitHub reference: `repo#N` or `owner/repo#N`.
  *
- * - Lookbehind: no word, path, `#`, `@` or `.` before it, so `a/b/c#1`,
- *   `me@host#1` and `x.repo#1` stay text.
+ * - Lookbehind: no letter, digit, `_`, `.`, `/`, `#`, `@`, `\` or `-`
+ *   before it, so `café#1`, `a/b/c#1`, `me@host#1` and `C:\src\api#1` stay
+ *   text.
  * - The owner follows GitHub's rule: letters, digits and hyphens.
- * - The repo needs two characters, so `C#10` and `F#6` stay text.
- * - Lookahead: the number ends the token, so `repo#12abc` stays text.
+ * - A repo may start with `-`, which `linkFor` allows only after an owner.
+ * - Lookahead: the number ends the token, so `repo#12abc`, `api#1@host`
+ *   and `api#1.5` stay text.
+ * - Every quantifier is bounded, so the scan stays linear.
  */
 const REFERENCE =
-  /(?<![\w./#@-])(?:(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})\/)?(?<repo>[A-Za-z0-9._-]{2,100})#(?<number>\d{1,9})(?![\w-])/;
+  /(?<![\p{L}\p{N}_./#@\\-])(?:(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})\/)?(?<repo>[A-Za-z0-9._-]{1,100})#(?<number>\d{1,9})(?![\p{L}\p{N}_@-]|\.\d)/gu;
 
 /**
- * Spans whose text stays as written: inline code, a markdown link or image,
- * an autolink and a bare URL. Each is matched before a reference that starts
- * inside it, so `[app#5](…)` and `https://x/y#5` are left alone.
+ * Nodes whose text stays as written: code, HTML, existing links and images,
+ * reference definitions, and references to them.
  */
-const PROTECTED = [
-  /(?<tick>`+)[^`][\s\S]*?(?<!`)\k<tick>(?!`)/.source,
-  /!?\[[^\]\n]*\]\([^)\n]*\)/.source,
-  /<[A-Za-z][A-Za-z0-9+.-]*:[^\s>]*>/.source,
-  /\b(?:https?|file):\/\/[^\s<>]+/.source,
-];
-
-const INLINE = new RegExp(
-  `(?<kept>${PROTECTED.map((p) => `(?:${p})`).join("|")})|${REFERENCE.source}`,
-  "g",
-);
-
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
-const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+const KEPT_NODES = new Set<Nodes["type"]>([
+  "code",
+  "definition",
+  "html",
+  "image",
+  "imageReference",
+  "inlineCode",
+  "link",
+  "linkReference",
+]);
 
 /**
- * Reads the two options: a default owner, and `repo=owner` pairs separated
- * by commas or newlines. Blank and malformed pairs are skipped.
+ * Inline HTML elements whose content stays as written, between an opening
+ * and a closing tag in the same paragraph.
+ */
+const KEPT_ELEMENTS = new Set(["a", "code", "kbd", "pre", "samp", "tt", "var"]);
+
+/** Nodes whose children are phrasing: text, inline code, inline HTML. */
+const PHRASING_PARENTS = new Set<Nodes["type"]>([
+  "delete",
+  "emphasis",
+  "heading",
+  "paragraph",
+  "strong",
+  "tableCell",
+]);
+
+/**
+ * The name of an HTML tag, read from its start: the parser already found
+ * where the tag ends, a quoted `>` in an attribute included.
+ */
+const HTML_TAG = /^<(?<closing>\/)?(?<name>[A-Za-z][A-Za-z0-9-]*)/u;
+
+/**
+ * Reads the two options: a default owner, and `name=owner` or
+ * `name=owner/repo` pairs separated by commas or newlines. A pair needs
+ * exactly one `=`, a name, and a valid owner, or it is skipped.
  */
 export function parseOwners(defaultOwner: string, pairs: string): Owners {
-  const owners = new Map<string, string>();
+  const owners = new Map<string, Target>();
 
   for (const pair of pairs.split(/[,\n]/)) {
-    const [repo, owner] = pair.split("=").map((part) => part.trim());
-    if (repo && owner) owners.set(repo.toLowerCase(), owner);
+    const parts = pair.split("=").map((part) => part.trim());
+    const [name, value = ""] = parts;
+    const target = TARGET.exec(value)?.groups;
+    if (parts.length === 2 && name && target?.["owner"] !== undefined) {
+      owners.set(name.toLowerCase(), {
+        owner: target["owner"],
+        repo: target["repo"] ?? null,
+      });
+    }
   }
 
   return { defaultOwner: defaultOwner.trim() || null, owners };
@@ -87,97 +143,164 @@ export function parseOwners(defaultOwner: string, pairs: string): Owners {
  * The URL for a reference. GitHub sends `/pull/N` on to `/issues/N` when N
  * is an issue, so one URL serves both.
  */
-export function urlFor(owner: string, repo: string, number: string): string {
+function urlFor(owner: string, repo: string, number: string): string {
   return `https://github.com/${owner}/${repo}/pull/${number}`;
 }
 
 /**
- * Turns each `repo#N` and `owner/repo#N` in markdown into a link to it, and
- * leaves code, links and URLs as written.
+ * Turns each `repo#N` and `owner/repo#N` in the text of a markdown document
+ * into a link to it. Only text the parser reads as prose changes: code, HTML,
+ * links, images, definitions and URLs stay as written, and so does every
+ * byte outside the references.
  */
 export function linkify(markdown: string, owners: Owners): string {
-  if (!markdown.includes("#")) return markdown;
+  // No reference without a `#` before a digit: skip the parse, which costs
+  // milliseconds on a long reply.
+  if (!/#\d/.test(markdown)) return markdown;
+  // The parser drops a leading byte-order mark before it counts offsets.
+  if (markdown.startsWith("\uFEFF")) {
+    return `\uFEFF${linkify(markdown.slice(1), owners)}`;
+  }
 
-  return splitFences(markdown)
-    .map((chunk) =>
-      chunk.isCode ? chunk.text : linkifyProse(chunk.text, owners),
-    )
-    .join("");
-}
+  const edits: Edit[] = [];
+  collect(parseMarkdown(markdown), markdown, owners, edits);
 
-function linkifyProse(text: string, owners: Owners): string {
   let linked = "";
   let from = 0;
+  for (const { start, end, text } of outsideUrls(edits, markdown)) {
+    linked += markdown.slice(from, start) + text;
+    from = end;
+  }
 
-  for (const match of text.matchAll(INLINE)) {
+  return linked + markdown.slice(from);
+}
+
+/**
+ * The edits that overlap no URL. Both lists run in source order, so one
+ * pass over each keeps it linear.
+ */
+function outsideUrls(edits: readonly Edit[], markdown: string): Edit[] {
+  const urls = [...markdown.matchAll(URL)].map((match) => ({
+    start: match.index,
+    end: match.index + match[0].length,
+  }));
+  let next = 0;
+
+  return edits.filter((edit) => {
+    while (next < urls.length && (urls[next]?.end ?? 0) <= edit.start) next++;
+    const url = urls[next];
+    return url === undefined || url.start >= edit.end;
+  });
+}
+
+/** Walks the tree in source order, adding an edit for each reference. */
+function collect(
+  node: Nodes,
+  markdown: string,
+  owners: Owners,
+  edits: Edit[],
+): void {
+  if (KEPT_NODES.has(node.type)) return;
+  if (node.type === "text") {
+    edits.push(...editsIn(node, markdown, owners));
+    return;
+  }
+  if (!("children" in node)) return;
+
+  // Open inline elements whose content stays as written, by name. Only
+  // phrasing holds inline HTML: a block of HTML is one node of its own.
+  const open = new Map<string, number>();
+  const isPhrasing = PHRASING_PARENTS.has(node.type);
+  for (const child of node.children) {
+    if (child.type === "html" && isPhrasing) {
+      track(open, child.value);
+      continue;
+    }
+    if (open.size > 0) continue;
+    collect(child, markdown, owners, edits);
+  }
+}
+
+/** Counts an inline HTML tag in or out of the open kept elements. */
+function track(open: Map<string, number>, tag: string): void {
+  const trimmed = tag.trim();
+  const groups = HTML_TAG.exec(trimmed)?.groups;
+  const name = groups?.["name"]?.toLowerCase();
+  if (
+    name === undefined ||
+    !KEPT_ELEMENTS.has(name) ||
+    trimmed.endsWith("/>")
+  ) {
+    return;
+  }
+
+  const depth = (open.get(name) ?? 0) + (groups?.["closing"] ? -1 : 1);
+  if (depth > 0) open.set(name, depth);
+  else open.delete(name);
+}
+
+/** The edits for the references in one text node, read from its source. */
+function editsIn(node: Text, markdown: string, owners: Owners): Edit[] {
+  const start = node.position?.start.offset;
+  const end = node.position?.end.offset;
+  if (start === undefined || end === undefined) return [];
+
+  const edits: Edit[] = [];
+  for (const match of markdown.slice(start, end).matchAll(REFERENCE)) {
     const link = linkFor(match[0], match.groups ?? {}, owners);
     if (link === null) continue;
 
-    linked += text.slice(from, match.index) + link;
-    from = match.index + match[0].length;
+    const at = start + match.index;
+    // `!` before `[` would make the link an image, so it is escaped,
+    // unless an odd run of backslashes already escapes it.
+    const isBang =
+      at > start &&
+      markdown[at - 1] === "!" &&
+      (/\\*$/u.exec(markdown.slice(start, at - 1))?.[0].length ?? 0) % 2 === 0;
+    edits.push({
+      start: isBang ? at - 1 : at,
+      end: at + match[0].length,
+      text: isBang ? `\\!${link}` : link,
+    });
   }
 
-  return linked + text.slice(from);
+  return edits;
 }
 
 /** The markdown link for one match, or null to leave it as written. */
 function linkFor(
   match: string,
-  { kept, owner, repo, number }: Record<string, string | undefined>,
+  { owner, repo, number }: Record<string, string | undefined>,
   { defaultOwner, owners }: Owners,
 ): string | null {
-  if (kept !== undefined || repo === undefined || number === undefined) {
-    return null;
+  if (repo === undefined || number === undefined) return null;
+  // GitHub allows a leading `-`, but in prose `-api#1` is a dash and a word.
+  if (owner === undefined && repo.startsWith("-")) return null;
+
+  if (owner !== undefined) {
+    return `[${match}](${urlFor(owner, repo, number)})`;
   }
-  if (!/[A-Za-z]/.test(repo) || NOT_REPOS.has(repo.toLowerCase())) return null;
 
-  const resolved = owner ?? owners.get(repo.toLowerCase()) ?? defaultOwner;
-  if (resolved === null) return null;
+  const listed = owners.get(repo.toLowerCase());
+  if (listed !== undefined) {
+    return `[${match}](${urlFor(listed.owner, listed.repo ?? repo, number)})`;
+  }
 
-  return `[${match}](${urlFor(resolved, repo, number)})`;
+  const guessed = guess(repo, defaultOwner);
+  if (guessed === null) return null;
+
+  return `[${match}](${urlFor(guessed, repo, number)})`;
 }
 
-type Chunk = { text: string; isCode: boolean };
-
 /**
- * Splits markdown into prose and fenced code, line by line. A fence closes on
- * a line of the same character, at least as long; an unclosed fence (a reply
- * still streaming) runs to the end.
+ * The default owner for a bare `repo#N` that reads as a repo: two or more
+ * characters, a letter among them, and no prose word.
  */
-function splitFences(markdown: string): Chunk[] {
-  const chunks: Chunk[] = [];
-  let fence: { char: string; length: number } | null = null;
-  let current = "";
+function guess(repo: string, defaultOwner: string | null): string | null {
+  const isRepo =
+    repo.length >= 2 &&
+    /[A-Za-z]/.test(repo) &&
+    !NOT_REPOS.has(repo.toLowerCase());
 
-  const flush = (isCode: boolean) => {
-    if (current) chunks.push({ text: current, isCode });
-    current = "";
-  };
-
-  for (const line of markdown.split(/(?<=\n)/)) {
-    if (fence === null) {
-      const marker = FENCE_OPEN.exec(line)?.[1];
-      if (marker !== undefined) {
-        flush(false);
-        fence = { char: marker.charAt(0), length: marker.length };
-      }
-      current += line;
-      continue;
-    }
-
-    current += line;
-    const marker = FENCE_CLOSE.exec(line.replace(/\n$/, ""))?.[1];
-    if (
-      marker !== undefined &&
-      marker.charAt(0) === fence.char &&
-      marker.length >= fence.length
-    ) {
-      flush(true);
-      fence = null;
-    }
-  }
-
-  flush(fence !== null);
-
-  return chunks;
+  return isRepo ? defaultOwner : null;
 }
