@@ -3,14 +3,24 @@ import type { Nodes, Text } from "mdast";
 import { parseMarkdown } from "./vendor/markdown.js";
 
 /**
- * Who owns a repo: the `owners` entry for it, else `defaultOwner`. Without
- * either, a bare `repo#N` stays text. Keys are lower case, as GitHub
- * compares repo names.
+ * Where a bare `repo#N` points: the `owners` entry for the name, else
+ * `defaultOwner`. Without either, it stays text. Keys are lower case, as
+ * GitHub compares repo names.
  */
 export type Owners = {
   defaultOwner: string | null;
-  owners: ReadonlyMap<string, string>;
+  owners: ReadonlyMap<string, Target>;
 };
+
+/**
+ * An `owners` entry: the owner, and the repo when the name written in
+ * prose differs from it (`tool-lines=fgilio/tool-lines-mod`).
+ */
+type Target = { owner: string; repo: string | null };
+
+/** An `owners` value: `owner`, or `owner/repo`. */
+const TARGET =
+  /^(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})(?:\/(?<repo>[A-Za-z0-9._-]{1,100}))?$/u;
 
 /** One replacement in the source: `[start, end)` becomes `text`. */
 type Edit = { start: number; end: number; text: string };
@@ -107,18 +117,22 @@ const PHRASING_PARENTS = new Set<Nodes["type"]>([
 const HTML_TAG = /^<(?<closing>\/)?(?<name>[A-Za-z][A-Za-z0-9-]*)/u;
 
 /**
- * Reads the two options: a default owner, and `repo=owner` pairs separated
- * by commas or newlines. A pair needs exactly one `=` and both sides, or it
- * is skipped.
+ * Reads the two options: a default owner, and `name=owner` or
+ * `name=owner/repo` pairs separated by commas or newlines. A pair needs
+ * exactly one `=`, a name, and a valid owner, or it is skipped.
  */
 export function parseOwners(defaultOwner: string, pairs: string): Owners {
-  const owners = new Map<string, string>();
+  const owners = new Map<string, Target>();
 
   for (const pair of pairs.split(/[,\n]/)) {
     const parts = pair.split("=").map((part) => part.trim());
-    const [repo, owner] = parts;
-    if (parts.length === 2 && repo && owner) {
-      owners.set(repo.toLowerCase(), owner);
+    const [name, value = ""] = parts;
+    const target = TARGET.exec(value)?.groups;
+    if (parts.length === 2 && name && target?.["owner"] !== undefined) {
+      owners.set(name.toLowerCase(), {
+        owner: target["owner"],
+        repo: target["repo"] ?? null,
+      });
     }
   }
 
@@ -263,11 +277,19 @@ function linkFor(
   // GitHub allows a leading `-`, but in prose `-api#1` is a dash and a word.
   if (owner === undefined && repo.startsWith("-")) return null;
 
-  const resolved =
-    owner ?? owners.get(repo.toLowerCase()) ?? guess(repo, defaultOwner);
-  if (resolved === null) return null;
+  if (owner !== undefined) {
+    return `[${match}](${urlFor(owner, repo, number)})`;
+  }
 
-  return `[${match}](${urlFor(resolved, repo, number)})`;
+  const listed = owners.get(repo.toLowerCase());
+  if (listed !== undefined) {
+    return `[${match}](${urlFor(listed.owner, listed.repo ?? repo, number)})`;
+  }
+
+  const guessed = guess(repo, defaultOwner);
+  if (guessed === null) return null;
+
+  return `[${match}](${urlFor(guessed, repo, number)})`;
 }
 
 /**

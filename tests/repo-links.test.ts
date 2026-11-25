@@ -300,6 +300,20 @@ test("text with no # before a digit is returned without a parse", () => {
   expect(linkify(text, ACME)).toBe(text);
 });
 
+test("an owners entry can name the repo a short name stands for", () => {
+  const aliased = parseOwners("", "tool-lines=fgilio/tool-lines-mod, api=acme");
+
+  expect(linkify("tool-lines#13, api#2 and web#3", aliased)).toBe(
+    "[tool-lines#13](https://github.com/fgilio/tool-lines-mod/pull/13), [api#2](https://github.com/acme/api/pull/2) and web#3",
+  );
+});
+
+test("an owners value that is no owner or owner/repo is skipped", () => {
+  expect([
+    ...parseOwners("", "a=b/c/d, e=-x, f=g h, ok=me/x.y").owners.keys(),
+  ]).toEqual(["ok"]);
+});
+
 test("an owner pair needs exactly one =", () => {
   expect([...parseOwners("", "api=one=two").owners]).toEqual([]);
 });
@@ -312,7 +326,7 @@ test("owner pairs parse loosely, and a blank default is none", () => {
 
   expect(defaultOwner).toBe(null);
   expect([...owners]).toEqual([
-    ["web-app", "acme"],
-    ["tools", "widgets"],
+    ["web-app", { owner: "acme", repo: null }],
+    ["tools", { owner: "widgets", repo: null }],
   ]);
 });

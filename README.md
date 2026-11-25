@@ -44,9 +44,11 @@ Set them in `/config`, or in `settings.json` under `pluginConfigs["repo-links@fg
 | Option | Default | What it does |
 | --- | --- | --- |
 | `defaultOwner` | empty | The GitHub user or organization for a bare `repo#N`. Empty links `owner/repo#N` only |
-| `owners` | empty | Repos outside the default owner, as `repo=owner` pairs separated by commas or newlines |
+| `owners` | empty | Repos outside the default owner, as `name=owner` or `name=owner/repo` pairs separated by commas or newlines. The second form links a short name to a repo named otherwise: `tool-lines=fgilio/tool-lines-mod` |
 
-To fill `owners` from an account's repositories, with forks left out:
+The default owner is a guess: it links any bare name, so a name that is not a repo of that owner becomes a broken link. To link only repos that exist, leave `defaultOwner` empty and list them all in `owners`.
+
+To fill `owners` from an account's repositories, with forks left out (run it again after you create a repo):
 
 ```sh
 gh repo list fgilio --limit 1000 --json name,isFork \
