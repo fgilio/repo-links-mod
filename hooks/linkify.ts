@@ -22,6 +22,32 @@ type Target = { owner: string; repo: string | null };
 const TARGET =
   /^(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})(?:\/(?<repo>[A-Za-z0-9._-]{1,100}))?$/u;
 
+/** A GitHub repository. */
+export type GitHubRepo = { owner: string; repo: string };
+
+/**
+ * What a reference resolves against: the owners options, and the
+ * repository of the session, where a bare `#N` points.
+ */
+type Context = Owners & { here: GitHubRepo | null };
+
+/**
+ * The visible text before the current node in its paragraph, heading or
+ * cell, kept to its last `LEAD_SIZE` characters: what a bare `#N` reads
+ * after, across emphasis (`**Option** #1`).
+ */
+type Lead = { text: string };
+
+/** Long enough for the longest prose word, a `.` and some whitespace. */
+const LEAD_SIZE = 32;
+
+/** Nodes that start a new run of visible text. */
+const LEAD_ROOTS = new Set<Nodes["type"]>([
+  "heading",
+  "paragraph",
+  "tableCell",
+]);
+
 /** One replacement in the source: `[start, end)` becomes `text`. */
 type Edit = { start: number; end: number; text: string };
 
@@ -61,7 +87,7 @@ const NOT_REPOS = new Set([
  * strikethrough). It ends at whitespace, `<`, `>` or a table's `|`, and the
  * scheme's length is bounded so a long word scans in linear time.
  */
-const URL =
+const URL_SPAN =
   /(?<![A-Za-z0-9+.-])(?:[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/|(?:mailto|data|tel|urn|sms|magnet|news|xmpp):|www\.)[^\s<>|]*/giu;
 
 /**
@@ -77,7 +103,28 @@ const URL =
  * - Every quantifier is bounded, so the scan stays linear.
  */
 const REFERENCE =
-  /(?<![\p{L}\p{N}_./#@\\-])(?:(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})\/)?(?<repo>[A-Za-z0-9._-]{1,100})#(?<number>\d{1,9})(?![\p{L}\p{N}_@-]|\.\d)/gu;
+  /(?<![\p{L}\p{N}_./#@\\-])(?:(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})\/)?(?<repo>[A-Za-z0-9._-]{1,100})#(?<number>\d{1,9})(?![\p{L}\p{N}_@-]|\.\d)|(?<![\p{L}\p{N}_./#@\\&-])#(?<bare>\d{1,9})(?![\p{L}\p{N}_@-]|\.\d)/gu;
+
+/** A `#N` that could be bare, by the same lookbehind as REFERENCE's. */
+const BARE_HINT = /(?<![\p{L}\p{N}_./#@\\&-])#\d/u;
+
+/**
+ * Words after which a bare `#N` is a count or a rank, not a pull request:
+ * "Option #1", "step #2", "color #333". Compared in any case, with an
+ * optional `.` and whitespace between the word and the `#`.
+ */
+const PROSE_BEFORE_BARE =
+  /(?:^|[^\p{L}\p{N}])(?:chapter|color|colour|day|item|items|level|no|nr|num|number|option|options|page|part|phase|priority|rank|ranked|round|section|step|steps|task|tier|top|version|week)\.?\s*$/iu;
+
+/**
+ * The scp-like remote git writes for SSH: `git@github.com:owner/repo.git`.
+ * A remote with a scheme (`ssh://`, `https://`) is read as a URL instead.
+ */
+const SCP_REMOTE = /^[^@\s/]+@(?<host>[^:\s/]+):(?<path>[^\s]+)$/u;
+
+/** A repo path on GitHub: `owner/repo`, with an optional `.git` or `/`. */
+const REPO_PATH =
+  /^\/?(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})\/(?<repo>[A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/u;
 
 /**
  * Nodes whose text stays as written: code, HTML, existing links and images,
@@ -140,6 +187,43 @@ export function parseOwners(defaultOwner: string, pairs: string): Owners {
 }
 
 /**
+ * The GitHub repository a git remote names, or null for any other host:
+ * `git@github.com:owner/repo.git`, `ssh://git@github.com:22/owner/repo`,
+ * `https://token@GitHub.com/owner/repo.git`.
+ */
+export function githubRepoOf(remote: string | null): GitHubRepo | null {
+  const trimmed = remote?.trim() ?? "";
+  const scp = SCP_REMOTE.exec(trimmed)?.groups;
+  const [host, path] =
+    scp !== undefined && !trimmed.includes("://")
+      ? [scp["host"], scp["path"]]
+      : urlParts(trimmed);
+  if (host?.toLowerCase() !== "github.com" || path === undefined) return null;
+
+  const groups = REPO_PATH.exec(path)?.groups;
+  const owner = groups?.["owner"];
+  const repo = groups?.["repo"];
+
+  return owner !== undefined && repo !== undefined ? { owner, repo } : null;
+}
+
+/** A URL remote's host and path, or nothing when it is not a URL. */
+function urlParts(remote: string): [string | undefined, string | undefined] {
+  if (!URL.canParse(remote)) return [undefined, undefined];
+  const { hostname, pathname } = new URL(remote);
+
+  return [hostname, pathname];
+}
+
+/**
+ * Whether the text holds a `#N` with nothing that makes it `repo#N` before
+ * it: the cheap check before the session's repo is looked up.
+ */
+export function hasBareReference(text: string): boolean {
+  return BARE_HINT.test(text);
+}
+
+/**
  * The URL for a reference. GitHub sends `/pull/N` on to `/issues/N` when N
  * is an issue, so one URL serves both.
  */
@@ -153,17 +237,21 @@ function urlFor(owner: string, repo: string, number: string): string {
  * links, images, definitions and URLs stay as written, and so does every
  * byte outside the references.
  */
-export function linkify(markdown: string, owners: Owners): string {
+export function linkify(
+  markdown: string,
+  owners: Owners,
+  here: GitHubRepo | null = null,
+): string {
   // No reference without a `#` before a digit: skip the parse, which costs
   // milliseconds on a long reply.
   if (!/#\d/.test(markdown)) return markdown;
   // The parser drops a leading byte-order mark before it counts offsets.
   if (markdown.startsWith("\uFEFF")) {
-    return `\uFEFF${linkify(markdown.slice(1), owners)}`;
+    return `\uFEFF${linkify(markdown.slice(1), owners, here)}`;
   }
 
   const edits: Edit[] = [];
-  collect(parseMarkdown(markdown), markdown, owners, edits);
+  collect(parseMarkdown(markdown), markdown, { ...owners, here }, edits);
 
   let linked = "";
   let from = 0;
@@ -180,7 +268,7 @@ export function linkify(markdown: string, owners: Owners): string {
  * pass over each keeps it linear.
  */
 function outsideUrls(edits: readonly Edit[], markdown: string): Edit[] {
-  const urls = [...markdown.matchAll(URL)].map((match) => ({
+  const urls = [...markdown.matchAll(URL_SPAN)].map((match) => ({
     start: match.index,
     end: match.index + match[0].length,
   }));
@@ -197,12 +285,17 @@ function outsideUrls(edits: readonly Edit[], markdown: string): Edit[] {
 function collect(
   node: Nodes,
   markdown: string,
-  owners: Owners,
+  context: Context,
   edits: Edit[],
+  lead: Lead = { text: "" },
 ): void {
-  if (KEPT_NODES.has(node.type)) return;
+  if (KEPT_NODES.has(node.type)) {
+    lead.text = (lead.text + visibleText(node)).slice(-LEAD_SIZE);
+    return;
+  }
   if (node.type === "text") {
-    edits.push(...editsIn(node, markdown, owners));
+    edits.push(...editsIn(node, markdown, context, lead));
+    lead.text = (lead.text + node.value).slice(-LEAD_SIZE);
     return;
   }
   if (!("children" in node)) return;
@@ -211,14 +304,31 @@ function collect(
   // phrasing holds inline HTML: a block of HTML is one node of its own.
   const open = new Map<string, number>();
   const isPhrasing = PHRASING_PARENTS.has(node.type);
+  const childLead = LEAD_ROOTS.has(node.type) ? { text: "" } : lead;
   for (const child of node.children) {
     if (child.type === "html" && isPhrasing) {
       track(open, child.value);
       continue;
     }
     if (open.size > 0) continue;
-    collect(child, markdown, owners, edits);
+    collect(
+      child,
+      markdown,
+      context,
+      edits,
+      isPhrasing ? childLead : { text: "" },
+    );
   }
+}
+
+/** The text a kept node shows: a code span's code, a link's label. */
+function visibleText(node: Nodes): string {
+  if (node.type === "inlineCode") return node.value;
+  if (!("children" in node)) return "";
+
+  return node.children
+    .map((child) => ("value" in child ? child.value : visibleText(child)))
+    .join("");
 }
 
 /** Counts an inline HTML tag in or out of the open kept elements. */
@@ -240,17 +350,28 @@ function track(open: Map<string, number>, tag: string): void {
 }
 
 /** The edits for the references in one text node, read from its source. */
-function editsIn(node: Text, markdown: string, owners: Owners): Edit[] {
+function editsIn(
+  node: Text,
+  markdown: string,
+  context: Context,
+  lead: Lead,
+): Edit[] {
   const start = node.position?.start.offset;
   const end = node.position?.end.offset;
   if (start === undefined || end === undefined) return [];
 
   const edits: Edit[] = [];
   for (const match of markdown.slice(start, end).matchAll(REFERENCE)) {
-    const link = linkFor(match[0], match.groups ?? {}, owners);
+    // Only the end of the text before the match: a prose word is short, and
+    // reading it all again for each match would grow with the square.
+    const at = start + match.index;
+    const before = (
+      (match.index < LEAD_SIZE ? lead.text : "") +
+      markdown.slice(Math.max(start, at - LEAD_SIZE), at)
+    ).slice(-LEAD_SIZE);
+    const link = linkFor(match[0], match.groups ?? {}, before, context);
     if (link === null) continue;
 
-    const at = start + match.index;
     // `!` before `[` would make the link an image, so it is escaped,
     // unless an odd run of backslashes already escapes it.
     const isBang =
@@ -270,9 +391,14 @@ function editsIn(node: Text, markdown: string, owners: Owners): Edit[] {
 /** The markdown link for one match, or null to leave it as written. */
 function linkFor(
   match: string,
-  { owner, repo, number }: Record<string, string | undefined>,
-  { defaultOwner, owners }: Owners,
+  { owner, repo, number, bare }: Record<string, string | undefined>,
+  before: string,
+  { defaultOwner, owners, here }: Context,
 ): string | null {
+  if (bare !== undefined) {
+    if (here === null || PROSE_BEFORE_BARE.test(before)) return null;
+    return `[${match}](${urlFor(here.owner, here.repo, bare)})`;
+  }
   if (repo === undefined || number === undefined) return null;
   // GitHub allows a leading `-`, but in prose `-api#1` is a dash and a word.
   if (owner === undefined && repo.startsWith("-")) return null;

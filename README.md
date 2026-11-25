@@ -9,6 +9,7 @@ A [Claude Code](https://code.claude.com) mod that turns GitHub references in Cla
 
 ## What it links
 
+- `#N`: the repo of the session's folder, read from its git `origin` remote when that is on GitHub. A session in a clone of `acme/app` links `#573` to `acme/app` pull request 573. After a word that counts or ranks (`Option #1`, `step #2`, `top #10`, `color #333`) it stays text, and so does every `#N` outside a GitHub clone.
 - `owner/repo#N`: that owner's repo. Always, with no setup.
 - `repo#N`: the owner the `owners` option names for the repo, else the default owner. With neither, it stays text.
 
@@ -44,6 +45,7 @@ Set them in `/config`, or in `settings.json` under `pluginConfigs["repo-links@fg
 | Option | Default | What it does |
 | --- | --- | --- |
 | `defaultOwner` | empty | The GitHub user or organization for a bare `repo#N`. Empty links `owner/repo#N` only |
+| `sessionRepo` | on | Link a bare `#N` to the repo of the session's folder |
 | `owners` | empty | Repos outside the default owner, as `name=owner` or `name=owner/repo` pairs separated by commas or newlines. The second form links a short name to a repo named otherwise: `tool-lines=fgilio/tool-lines-mod` |
 
 The default owner is a guess: it links any bare name, so a name that is not a repo of that owner becomes a broken link. To link only repos that exist, leave `defaultOwner` empty and list them all in `owners`.

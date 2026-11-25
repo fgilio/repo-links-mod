@@ -45,7 +45,17 @@ declare module "claude-code" {
     Text: (props: { children: string[] }) => RenderElement;
   };
 
+  export type SessionRepo = {
+    root: string;
+    remote: string | null;
+    internal: boolean;
+    name: string | null;
+  };
+
   export type EngineInterface = {
+    session: {
+      repo: () => Promise<SessionRepo | null>;
+    };
     ui: {
       resolve: (e: { surface: RenderSurface }) => ElementTable;
     };
@@ -59,11 +69,17 @@ declare module "claude-code" {
     next: Next<E, R>,
   ) => R | Promise<R>;
 
-  export type On = <C extends RenderComponent>(
-    event: "ui.render",
-    matcher: RenderMatcher<C>,
-    hook: Hook<RenderInput<C>, RenderElement>,
-  ) => unknown;
+  export type On = {
+    <C extends RenderComponent>(
+      event: "ui.render",
+      matcher: RenderMatcher<C>,
+      hook: Hook<RenderInput<C>, RenderElement>,
+    ): unknown;
+    (
+      event: "session.repo",
+      hook: Hook<Record<string, never>, { value: SessionRepo | null }>,
+    ): unknown;
+  };
 
   export type PluginOptions = Readonly<
     Record<string, string | number | boolean | readonly string[]>
